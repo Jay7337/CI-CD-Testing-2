@@ -9,6 +9,9 @@ on:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    # 🔴 CRITICAL FIX: Only run if the CI pipeline was SUCCESSFUL
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
     outputs:
       apps-json: ${{ steps.read.outputs.apps }}
       app-ids: ${{ steps.app-ids.outputs.ids }}

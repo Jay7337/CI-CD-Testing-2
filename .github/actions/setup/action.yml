@@ -1,0 +1,121 @@
+name: 'Setup Tech Stack'
+description: 'Sets up the required tech stack based on app configuration'
+
+inputs:
+  app-id:
+    description: 'Key of the app in config.json'
+    required: true
+  config-path:
+    description: 'Path to config.json'
+    required: true
+    default: './config.json'
+
+outputs:
+  directory:
+    description: 'The directory of the app'
+    value: ${{ steps.config.outputs.directory }}
+  type:
+    description: 'The type of the app'
+    value: ${{ steps.config.outputs.type }}
+  version:
+    description: 'The version'
+    value: ${{ steps.config.outputs.version }}
+  install-command:
+    description: 'Install command'
+    value: ${{ steps.config.outputs.install_command }}
+  test-command:
+    description: 'Test command'
+    value: ${{ steps.config.outputs.test_command }}
+  build-command:
+    description: 'Build command'
+    value: ${{ steps.config.outputs.build_command }}
+  lint:
+    description: 'Whether linting is enabled'
+    value: ${{ steps.config.outputs.lint }}
+  # CHANGED: 'lint-path' -> 'lint_path' to match ci.yml usage
+  lint_path:
+    description: 'Optional linting subdirectory'
+    value: ${{ steps.config.outputs.lint_path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read app config
+      id: config
+      shell: bash
+      run: |
+        CONFIG=$(jq -c --arg id "${{ inputs.app-id }}" '.apps[$id]' ${{ inputs.config-path }})
+
+        if [[ "$CONFIG" == "null" ]]; then
+          echo "❌ ERROR: App ID '${{ inputs.app-id }}' not found in config.json"
+          exit 1
+        fi
+
+        echo "config=$CONFIG" >> $GITHUB_OUTPUT
+        echo "directory=$(echo "$CONFIG" | jq -r '.directory')" >> $GITHUB_OUTPUT
+        echo "type=$(echo "$CONFIG" | jq -r '.type')" >> $GITHUB_OUTPUT
+        echo "version=$(echo "$CONFIG" | jq -r '.version')" >> $GITHUB_OUTPUT
+        echo "install_command=$(echo "$CONFIG" | jq -r '.["install-command"]')" >> $GITHUB_OUTPUT
+        echo "test_command=$(echo "$CONFIG" | jq -r '.["test-command"]')" >> $GITHUB_OUTPUT
+        echo "build_command=$(echo "$CONFIG" | jq -r '.["build-command"]')" >> $GITHUB_OUTPUT
+
+        # NEW LINT FIELDS
+        echo "lint=$(echo "$CONFIG" | jq -r '.lint')" >> $GITHUB_OUTPUT
+        
+        # Check if lint-path is an object or a string or null
+        LINT_PATH=$(echo "$CONFIG" | jq -c '."lint-path"')
+        echo "lint_path=$LINT_PATH" >> $GITHUB_OUTPUT
+
+    # Setup Node
+    - name: Setup Node.js
+      if: ${{ steps.config.outputs.type == 'node' }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ steps.config.outputs.version }}
+
+    # Setup Python
+    - name: Setup Python
+      if: ${{ steps.config.outputs.type == 'python' }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ steps.config.outputs.version }}
+
+    # Setup Flutter
+    - name: Setup Flutter
+      if: ${{ steps.config.outputs.type == 'flutter' }}
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ steps.config.outputs.version }}
+
+    # Setup Java
+    - name: Setup Java
+      if: ${{ steps.config.outputs.type == 'java' }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ steps.config.outputs.version }}
+        distribution: temurin
+
+    # Setup Go
+    - name: Setup Go
+      if: ${{ steps.config.outputs.type == 'go' }}
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ steps.config.outputs.version }}
+
+    # Install dependencies
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ steps.config.outputs.directory }}
+      run: ${{ steps.config.outputs.install_command }}
+
+    # Run tests
+    - name: Run tests
+      shell: bash
+      working-directory: ${{ steps.config.outputs.directory }}
+      run: ${{ steps.config.outputs.test_command }}
+
+    # Build application
+    - name: Build application
+      shell: bash
+      working-directory: ${{ steps.config.outputs.directory }}
+      run: ${{ steps.config.outputs.build_command }}

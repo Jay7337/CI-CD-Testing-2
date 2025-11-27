@@ -1,0 +1,167 @@
+name: Deploy (Mock AWS)
+
+on:
+  workflow_run:
+    workflows: ["Stack-Agnostic CI"]
+    types:
+      - completed
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      apps-json: ${{ steps.read.outputs.apps }}
+      app-ids: ${{ steps.app-ids.outputs.ids }}
+      apps-b64: ${{ steps.app-ids.outputs.apps_b64 }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read deployment-config.json
+        id: read
+        shell: bash
+        run: |
+          if [ ! -f deployment-config.json ]; then
+            echo "ERROR: deployment-config.json not found"
+            exit 1
+          fi
+          APPS=$(jq -c '.apps' deployment-config.json)
+          echo "apps=$APPS" >> $GITHUB_OUTPUT
+
+      - name: Extract app IDs
+        id: app-ids
+        run: |
+          RAW='${{ steps.read.outputs.apps }}'
+
+          # base64 encode the RAW JSON
+          RAW_B64=$(printf "%s" "$RAW" | base64 -w0)
+          echo "apps_b64=$RAW_B64" >> $GITHUB_OUTPUT
+
+          # extract the keys as a JSON array: ["source_1","source_2"]
+          IDS=$(echo "$RAW" | jq -c 'keys')
+          echo "ids=$IDS" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app-id: ${{ fromJson(needs.prepare.outputs.app-ids) }}
+      fail-fast: false
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Parse app config
+        id: parse
+        shell: bash
+        run: |
+          APP_KEY="${{ matrix.app-id }}"
+          APP_KEY=$(echo "$APP_KEY" | sed 's/^"//' | sed 's/"$//')
+
+          # Decode base64 safely
+          APPS_JSON=$(echo "${{ needs.prepare.outputs.apps-b64 }}" | base64 -d)
+
+          # Extract single app JSON
+          APP_JSON=$(printf "%s" "$APPS_JSON" | jq -c --arg k "$APP_KEY" '.[$k]')
+
+          echo "=== Parsed App Config ==="
+          echo "$APP_JSON" | jq '.'
+          echo "========================="
+
+          # Outputs
+          echo "image_repo=$(echo "$APP_JSON" | jq -r '.image_repo')" >> $GITHUB_OUTPUT
+          echo "launch_template_id=$(echo "$APP_JSON" | jq -r '.launch_template_id')" >> $GITHUB_OUTPUT
+          echo "asg_name=$(echo "$APP_JSON" | jq -r '.asg_name')" >> $GITHUB_OUTPUT
+          echo "region=$(echo "$APP_JSON" | jq -r '.region')" >> $GITHUB_OUTPUT
+          echo "port=$(echo "$APP_JSON" | jq -r '.port')" >> $GITHUB_OUTPUT
+          echo "health_path=$(echo "$APP_JSON" | jq -r '.health_path')" >> $GITHUB_OUTPUT
+          echo "instance_warmup=$(echo "$APP_JSON" | jq -r '.instance_warmup')" >> $GITHUB_OUTPUT
+          echo "min_healthy_percent=$(echo "$APP_JSON" | jq -r '.min_healthy_percent')" >> $GITHUB_OUTPUT
+          echo "user_data_template=$(echo "$APP_JSON" | jq -r '.user_data_template')" >> $GITHUB_OUTPUT
+          echo "ssm_param_name=$(echo "$APP_JSON" | jq -r '.ssm_param_name')" >> $GITHUB_OUTPUT
+
+      - name: Mock AWS Credentials
+        run: |
+          echo "=== MOCK: AWS Credentials ==="
+          echo "AWS Region: ${{ steps.parse.outputs.region }}"
+          echo "Role to assume: ${{ secrets.AWS_ROLE_TO_ASSUME || 'mock-arn:aws:iam::123456789012:role/mock-role' }}"
+          echo "============================"
+
+      - name: Export deployment vars
+        id: vars
+        run: |
+          echo "=== MOCK: Deployment Variables ==="
+          echo "Image Tag: ${{ github.sha }}"
+          echo "Image Repo: ${{ steps.parse.outputs.image_repo }}"
+          echo "Launch Template ID: ${{ steps.parse.outputs.launch_template_id }}"
+          echo "ASG Name: ${{ steps.parse.outputs.asg_name }}"
+          echo "User Data Template: ${{ steps.parse.outputs.user_data_template }}"
+          echo "SSM Param: ${{ steps.parse.outputs.ssm_param_name }}"
+          echo "================================"
+          
+          echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "image_repo=${{ steps.parse.outputs.image_repo }}" >> $GITHUB_OUTPUT
+          echo "lt_id=${{ steps.parse.outputs.launch_template_id }}" >> $GITHUB_OUTPUT
+          echo "asg_name=${{ steps.parse.outputs.asg_name }}" >> $GITHUB_OUTPUT
+          echo "ud_template=${{ steps.parse.outputs.user_data_template }}" >> $GITHUB_OUTPUT
+          echo "ssm_param=${{ steps.parse.outputs.ssm_param_name }}" >> $GITHUB_OUTPUT
+          echo "warmup=${{ steps.parse.outputs.instance_warmup }}" >> $GITHUB_OUTPUT
+          echo "minheal=${{ steps.parse.outputs.min_healthy_percent }}" >> $GITHUB_OUTPUT
+
+      - name: Mock SSM Update
+        if: ${{ steps.vars.outputs.ud_template == 'ssm' }}
+        run: |
+          echo "=== MOCK: Updating SSM Parameter ==="
+          echo "Parameter: ${{ steps.vars.outputs.ssm_param }}"
+          echo "Value: ${{ steps.vars.outputs.image_repo }}:${{ steps.vars.outputs.image_tag }}"
+          echo "=================================="
+
+      - name: Mock Launch Template Update
+        if: ${{ steps.vars.outputs.ud_template != 'ssm' }}
+        id: newlt
+        run: |
+          echo "=== MOCK: Creating New Launch Template Version ==="
+          echo "Launch Template ID: ${{ steps.vars.outputs.lt_id }}"
+          echo "Version Description: deploy-${{ github.sha }}"
+          echo "User Data: [base64-encoded user data would be here]"
+          echo "==============================================="
+          echo "new_version=42" >> $GITHUB_OUTPUT
+
+      - name: Mock ASG Update
+        if: ${{ steps.vars.outputs.ud_template != 'ssm' }}
+        run: |
+          echo "=== MOCK: Updating Auto Scaling Group ==="
+          echo "ASG Name: ${{ steps.vars.outputs.asg_name }}"
+          echo "Launch Template: ${{ steps.vars.outputs.lt_id }}"
+          echo "Version: ${{ steps.newlt.outputs.new_version || '42' }}"
+          echo "======================================="
+
+      - name: Mock Instance Refresh
+        id: refresh
+        run: |
+          echo "=== MOCK: Starting Instance Refresh ==="
+          echo "ASG: ${{ steps.vars.outputs.asg_name }}"
+          echo "Min Healthy: ${{ steps.vars.outputs.minheal }}%"
+          echo "Warmup: ${{ steps.vars.outputs.warmup }} seconds"
+          echo "Refresh ID: ir-$(date +%s)"
+          echo "====================================="
+          echo "refresh_id=mock-refresh-123" >> $GITHUB_OUTPUT
+
+      - name: Mock Refresh Status
+        run: |
+          echo "=== MOCK: Refresh Status ==="
+          echo "Refresh ID: ${{ steps.refresh.outputs.refresh_id }}"
+          echo "Status: Successful"
+          echo "Progress: 100%"
+          echo "==========================="
+
+      - name: Mock Smoke Test
+        run: |
+          echo "=== MOCK: Smoke Test ==="
+          echo "Checking health at: http://localhost:${{ steps.parse.outputs.port }}${{ steps.parse.outputs.health_path }}"
+          echo "Status: 200 OK"
+          echo "======================="
